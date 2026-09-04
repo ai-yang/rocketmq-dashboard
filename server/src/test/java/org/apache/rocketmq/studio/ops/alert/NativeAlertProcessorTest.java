@@ -478,6 +478,46 @@ class NativeAlertProcessorTest {
     }
 
     @Test
+    void resolvesActiveFingerprintWhenOnlyAnotherMetricWithTheSameLabelsAppearsTest() {
+        AlertService service = mock(AlertService.class);
+        AlertRuleVO rule = rule("local", "orders", 1);
+        rule.setMetric("consumer.delay.seconds");
+        when(service.listRules(AlertDomain.BUSINESS)).thenReturn(List.of(rule));
+        Instant collectedAt = Instant.parse("2026-09-04T00:00:00Z");
+        Map<String, String> labels = Map.of("consumerGroup", "orders");
+        AlertStateKey key = new AlertStateKey(rule.getId(), AlertFingerprint.of(rule.getId(), "local", labels));
+        AlertRuleState firing = new AlertRuleState(AlertStateStatus.FIRING, 1, 120D,
+                collectedAt.minusSeconds(60), collectedAt.minusSeconds(60),
+                collectedAt.minusSeconds(60), null);
+        ActiveAlertState active = new ActiveAlertState(key, firing, "local", labels);
+        AlertStateRepository states = mock(AlertStateRepository.class);
+        when(states.findActive(any(MetricCollectionScope.class), eq(List.of(rule)))).thenReturn(List.of(active));
+        when(states.save(eq(key), any(AlertRuleState.class))).thenReturn(true);
+        AlertRepository alerts = mock(AlertRepository.class);
+        when(alerts.saveAlert(any(SystemAlertVO.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        NotificationOutboxService outbox = mock(NotificationOutboxService.class);
+        AlertNotificationSuppressionService suppression = suppression();
+        MetricSample otherMetric = new MetricSample("consumer.lag.total", AlertDomain.BUSINESS, "local", null,
+                labels, 0D, MetricAvailability.AVAILABLE, collectedAt);
+
+        new NativeAlertProcessor(service,
+                new NativeAlertEvaluationService(new AlertRuleEvaluator(), new AlertStateMachine(), states,
+                        mock(MetricSnapshotRepository.class), alerts, outbox, suppression),
+                new AlertStateMachine(), states, alerts, outbox, suppression)
+                .processSuccessfulCollection(new MetricCollectionScope(AlertDomain.BUSINESS, "local",
+                        java.util.Set.of("consumer.delay.seconds", "consumer.lag.total")), List.of(otherMetric));
+
+        org.mockito.ArgumentCaptor<AlertRuleState> state = org.mockito.ArgumentCaptor.forClass(AlertRuleState.class);
+        org.mockito.ArgumentCaptor<SystemAlertVO> event = org.mockito.ArgumentCaptor.forClass(SystemAlertVO.class);
+        verify(states).save(eq(key), state.capture());
+        verify(alerts).saveAlert(event.capture());
+        assertThat(state.getValue().status()).isEqualTo(AlertStateStatus.RESOLVED);
+        assertThat(event.getValue().getTransition()).isEqualTo(AlertStateTransition.RESOLVED.name());
+        assertThat(event.getValue().getLabels()).isEqualTo(labels);
+        verify(outbox).enqueue(any(SystemAlertVO.class), eq(rule), eq(labels));
+    }
+
+    @Test
     void doesNotResolveMissingActiveStateWhenCollectionReportsWholeScopeUnavailableTest() {
         AlertService service = mock(AlertService.class);
         AlertRuleVO rule = rule("local", "orders", 1);
