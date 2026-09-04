@@ -19,13 +19,15 @@ import { App, message, Modal } from 'antd';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type React from 'react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
+  ClusterConfigPreviewResult,
   ClusterInfo,
   ClusterProbeResult,
   NameServerConfigDiffResult,
 } from '../../../api/cluster';
+import type { Instance } from '../../../api/instance';
 import { LangProvider } from '../../../i18n/LangContext';
 
 const clusterServiceMocks = vi.hoisted(() => ({
@@ -86,6 +88,31 @@ const renderWithRoute = (ui: React.ReactElement, route: string) =>
       </LangProvider>
     </App>,
   );
+
+const ClusterPageWithRouteSwitcher = ({ nextRoute }: { nextRoute: string }) => {
+  const navigate = useNavigate();
+  return (
+    <>
+      <button type="button" onClick={() => navigate(nextRoute)}>
+        switch route
+      </button>
+      <ClusterPage />
+    </>
+  );
+};
+
+const buildInstance = (id: number, name: string, endpoint: string): Instance => ({
+  id,
+  name,
+  endpoint,
+  type: 'DIRECT',
+  vendor: 'APACHE',
+  remark: '',
+  topicCount: 0,
+  consumerGroupCount: 0,
+  gmtCreate: '',
+  gmtModified: '',
+});
 
 const buildCluster = ({
   tpsIn = 12480,
@@ -150,6 +177,29 @@ const buildCluster = ({
   tpsHistory: [tpsIn],
 });
 
+const buildConfigPreview = (
+  cluster: ClusterInfo,
+  writeQueueNums: number,
+): ClusterConfigPreviewResult => ({
+  cluster,
+  currentConfig: cluster.config,
+  proposedConfig: { ...cluster.config, writeQueueNums, readQueueNums: writeQueueNums },
+  targetBrokers: cluster.brokers.map((broker) => ({
+    name: broker.name,
+    address: broker.addr,
+  })),
+  brokerProperties: { defaultTopicQueueNums: String(writeQueueNums) },
+  changes: [
+    {
+      field: 'writeQueueNums',
+      currentValue: String(cluster.config.writeQueueNums),
+      proposedValue: String(writeQueueNums),
+      brokerProperty: 'defaultTopicQueueNums',
+    },
+  ],
+  changed: true,
+});
+
 const deferred = <T,>() => {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -207,7 +257,7 @@ describe('Cluster page', () => {
       {
         id: 10,
         name: 'instance-1',
-        endpoint: 'namesrv-1:9876',
+        endpoint: '10.101.2.1:9876',
         type: 'DIRECT',
         vendor: 'APACHE',
         remark: '',
@@ -408,6 +458,213 @@ describe('Cluster page', () => {
     expect(within(dialog).getByText('10.101.2.11:10911')).toBeInTheDocument();
     expect(within(dialog).getByText('defaultTopicQueueNums=16')).toBeInTheDocument();
     expect(within(dialog).getByRole('row', { name: /写队列数/ })).toHaveTextContent('16');
+  });
+
+  it('keeps stale config previews from an old modal or old form generation out of the current modal', async () => {
+    const user = userEvent.setup();
+    const staleModalPreview = deferred<ClusterConfigPreviewResult>();
+    const staleFormPreview = deferred<ClusterConfigPreviewResult>();
+    const currentPreview = deferred<ClusterConfigPreviewResult>();
+    const successSpy = vi.spyOn(message, 'success').mockImplementation(vi.fn());
+    clusterServiceMocks.previewClusterConfig
+      .mockReset()
+      .mockReturnValueOnce(staleModalPreview.promise)
+      .mockReturnValueOnce(staleFormPreview.promise)
+      .mockReturnValueOnce(currentPreview.promise);
+    renderWithProviders(<ClusterPage />);
+
+    const brokerRow = await screen.findByRole('row', { name: /10\.101\.2\.11:10911/ });
+    const configButton = within(brokerRow).getByRole('button', { name: /^配\s*置$/ });
+    await waitFor(() => expect(configButton).toBeEnabled());
+    await user.click(configButton);
+    let dialog = await screen.findByRole('dialog', { name: /配置 - rocketmq-prod/ });
+    let writeQueuesInput = within(dialog).getByLabelText('写队列数');
+    await user.clear(writeQueuesInput);
+    await user.type(writeQueuesInput, '16');
+    await user.click(within(dialog).getByRole('button', { name: /预\s*览/ }));
+    await waitFor(() => expect(clusterServiceMocks.previewClusterConfig).toHaveBeenCalledTimes(1));
+
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(dialog).not.toBeVisible());
+    await user.click(configButton);
+    dialog = await screen.findByRole('dialog', { name: /配置 - rocketmq-prod/ });
+    writeQueuesInput = within(dialog).getByLabelText('写队列数');
+    await user.clear(writeQueuesInput);
+    await user.type(writeQueuesInput, '24');
+    const previewButton = within(dialog).getByRole('button', { name: /预\s*览/ });
+    await user.click(previewButton);
+    await waitFor(() => expect(clusterServiceMocks.previewClusterConfig).toHaveBeenCalledTimes(2));
+
+    await user.clear(writeQueuesInput);
+    await user.type(writeQueuesInput, '32');
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    await user.click(previewButton);
+    await waitFor(() => expect(clusterServiceMocks.previewClusterConfig).toHaveBeenCalledTimes(3));
+
+    const cluster = buildCluster();
+    await act(async () => {
+      currentPreview.resolve(buildConfigPreview(cluster, 32));
+      await currentPreview.promise;
+    });
+    expect(within(dialog).getByText('defaultTopicQueueNums=32')).toBeInTheDocument();
+
+    await act(async () => {
+      staleFormPreview.resolve(buildConfigPreview(cluster, 24));
+      await staleFormPreview.promise;
+      staleModalPreview.resolve(buildConfigPreview(cluster, 16));
+      await staleModalPreview.promise;
+    });
+    expect(within(dialog).getByText('defaultTopicQueueNums=32')).toBeInTheDocument();
+    expect(within(dialog).queryByText('defaultTopicQueueNums=24')).not.toBeInTheDocument();
+    expect(within(dialog).queryByText('defaultTopicQueueNums=16')).not.toBeInTheDocument();
+    expect(successSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes Broker config drift through the Apache instance matching the registry endpoint', async () => {
+    const user = userEvent.setup();
+    instanceServiceMocks.listInstances.mockResolvedValue([
+      buildInstance(1, 'instance-a', 'namesrv-a:9876'),
+      buildInstance(2, 'instance-b', 'NS-B-2:9876; ns-b-1:9876'),
+    ]);
+    const registryCluster = buildCluster();
+    registryCluster.id = 'DefaultCluster';
+    registryCluster.name = 'registry-b';
+    registryCluster.nsClusterName = 'DefaultCluster';
+    registryCluster.endpoint = 'ns-b-1:9876,NS-B-2:9876';
+    registryCluster.brokers = [
+      { ...registryCluster.brokers[0], addr: '10.202.0.11:10911', name: 'broker-b' },
+    ];
+    clusterServiceMocks.listRegistryClusters.mockResolvedValue([registryCluster]);
+
+    renderWithRoute(<ClusterPage />, '/cluster?instanceId=instance-a');
+
+    const brokerRow = await screen.findByRole('row', { name: /10\.202\.0\.11:10911/ });
+    const diffButton = within(brokerRow).getByRole('button', { name: /配置差异/ });
+    await waitFor(() => expect(diffButton).toBeEnabled());
+    await user.click(diffButton);
+
+    await waitFor(() =>
+      expect(clusterServiceMocks.getBrokerConfigDiff).toHaveBeenCalledWith(
+        'DefaultCluster',
+        'instance-b',
+      ),
+    );
+    expect(clusterServiceMocks.getBrokerConfigDiff).not.toHaveBeenCalledWith(
+      'DefaultCluster',
+      'instance-a',
+    );
+  });
+
+  it('freezes the registry Broker config target when the route changes while the modal is open', async () => {
+    const user = userEvent.setup();
+    instanceServiceMocks.listInstances.mockResolvedValue([
+      buildInstance(1, 'instance-a', 'namesrv-a:9876'),
+      buildInstance(2, 'instance-b', 'namesrv-b:9876'),
+      buildInstance(3, 'instance-c', 'namesrv-c:9876'),
+    ]);
+    const registryCluster = buildCluster();
+    registryCluster.id = 'DefaultCluster';
+    registryCluster.name = 'registry-b';
+    registryCluster.nsClusterName = 'DefaultCluster';
+    registryCluster.endpoint = 'namesrv-b:9876';
+    registryCluster.brokers = [
+      { ...registryCluster.brokers[0], addr: '10.202.0.11:10911', name: 'broker-b' },
+    ];
+    const refreshedRegistryCluster = {
+      ...registryCluster,
+      brokers: registryCluster.brokers.map((broker) => ({ ...broker })),
+      config: { ...registryCluster.config, fileReservedTime: 96 },
+    };
+    clusterServiceMocks.listRegistryClusters
+      .mockReset()
+      .mockResolvedValueOnce([registryCluster])
+      .mockResolvedValue([refreshedRegistryCluster]);
+
+    renderWithRoute(
+      <ClusterPageWithRouteSwitcher nextRoute="/cluster?instanceId=instance-c" />,
+      '/cluster?instanceId=instance-a',
+    );
+
+    const brokerRow = await screen.findByRole('row', { name: /10\.202\.0\.11:10911/ });
+    const configButton = within(brokerRow).getByRole('button', { name: /^配\s*置$/ });
+    await waitFor(() => expect(configButton).toBeEnabled());
+    await user.click(configButton);
+    const dialog = await screen.findByRole('dialog', { name: /配置 - registry-b/ });
+
+    fireEvent.click(screen.getByRole('button', { name: 'switch route' }));
+    await waitFor(() =>
+      expect(clusterServiceMocks.listClusters).toHaveBeenCalledWith('instance-c'),
+    );
+    await user.click(within(dialog).getByRole('button', { name: 'OK' }));
+
+    await waitFor(() =>
+      expect(clusterServiceMocks.updateClusterConfig).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'DefaultCluster', instanceId: 'instance-b' }),
+      ),
+    );
+    expect(clusterServiceMocks.updateClusterConfig).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'DefaultCluster', instanceId: 'instance-c' }),
+    );
+    await waitFor(() => expect(clusterServiceMocks.listRegistryClusters).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(dialog).not.toBeVisible());
+
+    const refreshedBrokerRow = await screen.findByRole('row', { name: /10\.202\.0\.11:10911/ });
+    await user.click(within(refreshedBrokerRow).getByRole('button', { name: /^配\s*置$/ }));
+    const reopenedDialog = await screen.findByRole('dialog', { name: /配置 - registry-b/ });
+    expect(within(reopenedDialog).getByLabelText('文件保留时长 (小时)')).toHaveDisplayValue('96');
+  });
+
+  it('refreshes registry Broker data after a partial config update', async () => {
+    const user = userEvent.setup();
+    const warningSpy = vi.spyOn(message, 'warning').mockImplementation(vi.fn());
+    const cluster = buildCluster();
+    clusterServiceMocks.updateClusterConfig.mockResolvedValueOnce({
+      cluster,
+      status: 'PARTIAL',
+      successfulBrokers: [cluster.brokers[0].addr],
+      failedBrokers: [{ address: cluster.brokers[1].addr, message: 'broker unavailable' }],
+    });
+    renderWithProviders(<ClusterPage />);
+
+    const brokerRow = await screen.findByRole('row', { name: /10\.101\.2\.11:10911/ });
+    const configButton = within(brokerRow).getByRole('button', { name: /^配\s*置$/ });
+    await waitFor(() => expect(configButton).toBeEnabled());
+    await user.click(configButton);
+    const dialog = await screen.findByRole('dialog', { name: /配置 - rocketmq-prod/ });
+    await user.click(within(dialog).getByRole('button', { name: 'OK' }));
+
+    await waitFor(() => expect(clusterServiceMocks.listRegistryClusters).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('dialog', { name: /配置 - rocketmq-prod/ })).toBeInTheDocument();
+    expect(dialog).not.toHaveClass('ant-zoom-leave');
+    expect(warningSpy).toHaveBeenCalledWith(expect.stringContaining('10.101.2.12:10911'));
+  });
+
+  it('disables registry Broker config actions when the endpoint mapping is ambiguous', async () => {
+    instanceServiceMocks.listInstances.mockResolvedValue([
+      buildInstance(1, 'instance-a', 'namesrv-1:9876;namesrv-2:9876'),
+      buildInstance(2, 'instance-b', 'NAMESRV-2:9876,namesrv-1:9876'),
+    ]);
+    const registryCluster = buildCluster();
+    registryCluster.endpoint = 'namesrv-2:9876,namesrv-1:9876';
+    registryCluster.brokers = [
+      { ...registryCluster.brokers[0], addr: '10.203.0.11:10911', name: 'ambiguous-broker' },
+    ];
+    clusterServiceMocks.listRegistryClusters.mockResolvedValue([registryCluster]);
+
+    renderWithRoute(<ClusterPage />, '/cluster?instanceId=instance-a');
+
+    const brokerRow = await screen.findByRole('row', { name: /10\.203\.0\.11:10911/ });
+    const diffButton = within(brokerRow).getByRole('button', { name: /配置差异/ });
+    const configButton = within(brokerRow).getByRole('button', { name: /^配\s*置$/ });
+    await waitFor(() => expect(instanceServiceMocks.listInstances).toHaveBeenCalled());
+
+    expect(diffButton).toBeDisabled();
+    expect(configButton).toBeDisabled();
+    expect(configButton.getAttribute('title')).toContain('无法唯一映射到 Apache 实例');
+    fireEvent.click(diffButton);
+    fireEvent.click(configButton);
+    expect(clusterServiceMocks.getBrokerConfigDiff).not.toHaveBeenCalled();
+    expect(clusterServiceMocks.updateClusterConfig).not.toHaveBeenCalled();
   });
 
   it('keeps cluster tabs usable when address fields are missing', async () => {

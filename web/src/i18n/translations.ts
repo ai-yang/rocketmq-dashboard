@@ -1402,6 +1402,10 @@ const translations: Record<string, Record<Lang, string>> = {
     zh: 'Broker 配置更新失败，请检查：{brokers}',
     en: 'Broker configuration update failed. Check: {brokers}',
   },
+  'cluster.registryInstanceUnavailable': {
+    zh: 'NameServer 地址 {endpoint} 无法唯一映射到 Apache 实例，配置操作已禁用',
+    en: 'NameServer endpoint {endpoint} does not map to exactly one Apache instance; configuration actions are disabled',
+  },
   'cluster.configPreview': { zh: '预览', en: 'Preview' },
   'cluster.configPreviewGenerated': { zh: '预览已生成', en: 'Preview generated' },
   'cluster.configPreviewFailed': { zh: '预览失败', en: 'Preview failed' },
