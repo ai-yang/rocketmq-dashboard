@@ -60,6 +60,28 @@ describe('formatBytes', () => {
     expect(formatUtcDateTime('2026-08-23T10:35:38Z', 'UTC')).toBe('2026-08-23 10:35:38 UTC');
   });
 
+  it('reuses the UTC date formatter for the same timezone', () => {
+    const original = Intl.DateTimeFormat;
+    let constructorCalls = 0;
+    Intl.DateTimeFormat = new Proxy(original, {
+      apply(target, thisArgument, argumentsList) {
+        constructorCalls += 1;
+        return Reflect.apply(target, thisArgument, argumentsList);
+      },
+      construct(target, argumentsList, newTarget) {
+        constructorCalls += 1;
+        return Reflect.construct(target, argumentsList, newTarget);
+      },
+    });
+    try {
+      expect(formatUtcDateTime('2026-08-23T10:35:38Z', 'Pacific/Kiritimati')).not.toBe('-');
+      expect(formatUtcDateTime('2026-08-24T10:35:38Z', 'Pacific/Kiritimati')).not.toBe('-');
+      expect(constructorCalls).toBe(1);
+    } finally {
+      Intl.DateTimeFormat = original;
+    }
+  });
+
   it('formats recent timestamps for compact conversation history', () => {
     const now = new Date(2026, 7, 13, 15, 30).getTime();
     const zh = (key: string, params?: Record<string, string | number>) =>

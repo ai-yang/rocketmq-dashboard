@@ -18,6 +18,26 @@
 const pad = (n: number, width = 2): string => String(n).padStart(width, '0');
 const safeDecimals = (decimals: number): number =>
   Number.isFinite(decimals) ? Math.min(100, Math.max(0, Math.trunc(decimals))) : 1;
+const utcDateTimeFormatters = new Map<string | undefined, Intl.DateTimeFormat>();
+
+const utcDateTimeFormatter = (timeZone?: string): Intl.DateTimeFormat => {
+  const cached = utcDateTimeFormatters.get(timeZone);
+  if (cached) return cached;
+
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'short',
+  });
+  utcDateTimeFormatters.set(timeZone, formatter);
+  return formatter;
+};
 
 /**
  * Format a date string or Date object to 'YYYY-MM-DD HH:mm:ss'.
@@ -39,7 +59,7 @@ export function formatDateTime(date: string | Date | null | undefined): string {
  */
 export function formatUtcDateTime(
   date: string | Date | null | undefined,
-  timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone,
+  timeZone?: string,
 ): string {
   if (date === null || date === undefined || (typeof date === 'string' && !date.trim())) return '-';
   const utcDate =
@@ -48,17 +68,7 @@ export function formatUtcDateTime(
       : new Date(date);
   if (Number.isNaN(utcDate.getTime())) return '-';
 
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hourCycle: 'h23',
-    timeZoneName: 'short',
-  }).formatToParts(utcDate);
+  const parts = utcDateTimeFormatter(timeZone).formatToParts(utcDate);
   const value = (type: Intl.DateTimeFormatPartTypes) =>
     parts.find((part) => part.type === type)?.value;
   const year = value('year');
